@@ -52,11 +52,16 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="history"
+        name="workout"
         options={{
-          title: 'History',
+          title: 'Workout',
           tabBarIcon: ({ focused }) => (
-            <TabItem focused={focused} iconFocused="time" iconUnfocused="time-outline" label="History" />
+            <TabItem
+              focused={focused}
+              iconFocused="barbell"
+              iconUnfocused="barbell-outline"
+              label="Workout"
+            />
           ),
         }}
       />
