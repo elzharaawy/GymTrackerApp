@@ -1,50 +1,243 @@
-# Welcome to your Expo app 👋
+# 🏋️ GymTracker
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A modern React Native fitness application that helps users track workouts, monitor progress, and stay consistent with their fitness journey. GymTracker provides an intuitive interface for managing workout routines, exercise history, and personal fitness goals.
 
-## Get started
+---
 
-1. Install dependencies
+## 📱 Features
 
-   ```bash
-   npm install
-   ```
+### 🔐 Authentication
 
-2. Start the app
+* Secure user registration
+* User login and logout
+* Firebase Authentication integration
+* Password recovery
 
-   ```bash
-   npx expo start
-   ```
+### 👤 User Profile
 
-In the output, you'll find options to open the app in a
+* Edit profile information
+* Upload profile picture
+* Personal fitness details
+* Body measurements
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+### 💪 Workout Management
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+* Create custom workout plans
+* Track completed workouts
+* View workout history
+* Organize exercises by muscle group
+* Workout progress tracking
 
-## Get a fresh project
+### 📊 Progress Tracking
 
-When you're ready, run:
+* Body weight tracking
+* Progress statistics
+* Workout completion history
+* Fitness achievements
 
-```bash
-npm run reset-project
+### 🖼️ Image Upload
+
+* Upload profile photos
+* Workout images
+* Cloudinary image storage
+* Fast and secure image delivery
+
+### ☁️ Cloud Database
+
+* Firebase Firestore integration
+* Real-time data synchronization
+* Secure user data storage
+
+---
+
+# 🚀 Tech Stack
+
+## Frontend
+
+* React Native
+* Expo
+* React Navigation
+* React Native Paper
+* React Native Vector Icons
+
+## Backend & Cloud
+
+* Firebase Authentication
+* Firebase Firestore
+* Cloudinary (Image Storage)
+
+## State Management
+
+* React Context API
+* React Hooks
+
+---
+
+# 📂 Project Structure
+
+```
+GymTracker/
+│
+├── assets/
+├── components/
+├── screens/
+├── navigation/
+├── services/
+├── firebase/
+├── utils/
+├── hooks/
+├── context/
+├── constants/
+├── App.js
+├── package.json
+└── README.md
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+---
 
-## Learn more
+# 📦 Installation
 
-To learn more about developing your project with Expo, look at the following resources:
+Clone the repository:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+git clone https://github.com/yourusername/GymTracker.git
+```
 
-## Join the community
+Navigate into the project:
 
-Join our community of developers creating universal apps.
+```bash
+cd GymTracker
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Install dependencies:
+
+```bash
+npm install
+```
+
+or
+
+```bash
+yarn install
+```
+
+Start the development server:
+
+```bash
+npx expo start
+```
+
+---
+
+# 🔥 Firebase Configuration
+
+Create a Firebase project and enable:
+
+* Authentication
+* Firestore Database
+
+Add your Firebase configuration inside:
+
+```
+firebase/config.js
+```
+
+Example:
+
+```javascript
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "...",
+  projectId: "...",
+  storageBucket: "...",
+  messagingSenderId: "...",
+  appId: "..."
+};
+```
+
+---
+
+# ☁️ Cloudinary Configuration
+
+Create a free Cloudinary account.
+
+Configure:
+
+```
+Cloud Name
+API Key
+Upload Preset
+```
+
+Store these values inside your environment variables or configuration file.
+
+---
+
+# 📸 Screens
+
+* Splash Screen
+* Login
+* Register
+* Home Dashboard
+* Workout Details
+* Progress
+* Profile
+* Settings
+
+---
+
+# 🎯 Future Improvements
+
+* Nutrition Tracker
+* Water Intake Tracker
+* BMI Calculator
+* Workout Timer
+* Rest Timer
+* Dark Mode
+* Push Notifications
+* Apple Health Integration
+* Google Fit Integration
+* AI Workout Recommendations
+* Offline Mode
+
+---
+
+# 🔒 Security
+
+* Firebase Authentication
+* Firestore Security Rules
+* Secure Image Uploads
+* Input Validation
+* Protected Routes
+
+---
+
+# 🤝 Contributing
+
+Contributions are welcome.
+
+1. Fork the repository.
+2. Create a new feature branch.
+3. Commit your changes.
+4. Push to your branch.
+5. Open a Pull Request.
+
+---
+
+# 📄 License
+
+This project is licensed under the MIT License.
+
+---
+
+# 👨‍💻 Developer
+
+**Abadir**
+
+Computer Science Student | React Native Developer | Firebase Developer
+
+---
+
+## ⭐ Support
+
+If you found this project helpful, consider giving it a ⭐ on GitHub. Your support helps the project grow and motivates future development.
