@@ -5,13 +5,13 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  SafeAreaView,
   ScrollView,
   Alert,
   ActivityIndicator,
   Switch,
   Image,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { auth, db, storage } from '../../firebaseConfig';
@@ -161,7 +161,7 @@ export default function ProfileScreen() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'], // ✅ Fixed: replaces deprecated MediaTypeOptions.Images
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.7,
@@ -172,14 +172,25 @@ export default function ProfileScreen() {
     await uploadPhoto(result.assets[0].uri);
   };
 
+  // ✅ Fixed: use XMLHttpRequest instead of fetch() for reliable local file URI → blob conversion
+  const uriToBlob = (uri: string): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload = () => resolve(xhr.response);
+      xhr.onerror = () => reject(new Error('Failed to convert URI to blob'));
+      xhr.responseType = 'blob';
+      xhr.open('GET', uri, true);
+      xhr.send(null);
+    });
+  };
+
   const uploadPhoto = async (uri: string) => {
     if (!user) return;
     try {
       setUploadingPhoto(true);
 
-      // Convert local URI to a blob
-      const response = await fetch(uri);
-      const blob = await response.blob();
+      // ✅ Fixed: XMLHttpRequest handles file:// URIs correctly on both iOS & Android
+      const blob = await uriToBlob(uri);
 
       // Upload to Firebase Storage at a per-user path
       const fileRef = storageRef(storage, `profile-photos/${user.uid}.jpg`);
@@ -390,7 +401,9 @@ export default function ProfileScreen() {
             {saving ? (
               <ActivityIndicator size="small" color="#fff" />
             ) : (
-              <Text style={styles.editBtnText}>{isEditing ? 'Save' : 'Edit'}</Text>
+              <Text style={[styles.editBtnText, isEditing && styles.editBtnTextActive]}>
+                {isEditing ? 'Save' : 'Edit'}
+              </Text>
             )}
           </TouchableOpacity>
         </View>
@@ -699,6 +712,7 @@ const styles = StyleSheet.create({
   },
   editBtnActive: { backgroundColor: '#1e1b4b' },
   editBtnText: { fontSize: 14, fontWeight: '700', color: '#1a1a2e' },
+  editBtnTextActive: { color: '#fff' },
 
   // Avatar
   avatarSection: { alignItems: 'center', marginBottom: 20 },
