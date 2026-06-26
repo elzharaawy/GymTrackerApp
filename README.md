@@ -100,7 +100,7 @@ GymTracker/
 Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/GymTracker.git
+git clone https://github.com/elzharaawy/GymTrackerApp.git
 ```
 
 Navigate into the project:
