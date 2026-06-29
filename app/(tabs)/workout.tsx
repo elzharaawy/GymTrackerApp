@@ -6,6 +6,8 @@
  * ✓ Tablet, landscape, foldable support
  * ✓ Accessibility: dynamic font sizes, high contrast
  * ✓ Performance: FlatList, memo, useCallback maintained
+ * ✓ NEW: Routines are now persisted to Firestore (per-user) so they survive
+ *        login/logout and reload automatically when the user signs back in.
  */
 
 import React, {
@@ -38,7 +40,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { auth, db } from '../../firebaseConfig';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
+import {
+  collection,
+  addDoc,
+  serverTimestamp,
+  doc,
+  getDoc,
+  setDoc,
+} from 'firebase/firestore';
 
 // ─────────────────────────────────────────────
 // Responsive Utilities
@@ -1080,7 +1090,10 @@ export default function WorkoutScreen() {
   const REST_DURATION = 90;
 
   // ── Routines state ──
+  // NOTE: Routines are persisted per-user in Firestore at users/{uid} (field "routines"),
+  // so the same list appears after logout/login, on any device the user logs into.
   const [routines, setRoutines] = useState<Routine[]>([]);
+  const [routinesLoading, setRoutinesLoading] = useState(true);
   const [createRoutineVisible, setCreateRoutineVisible] = useState(false);
   const [routinePickerVisible, setRoutinePickerVisible] = useState(false);
   const [routineSearch, setRoutineSearch] = useState('');
@@ -1089,6 +1102,48 @@ export default function WorkoutScreen() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const restIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // ── Load routines from Firestore whenever auth state changes (login/logout) ──
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        // Logged out: clear local routines (next login will re-fetch that user's data)
+        setRoutines([]);
+        setRoutinesLoading(false);
+        return;
+      }
+      try {
+        setRoutinesLoading(true);
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+        if (userDocSnap.exists() && Array.isArray(userDocSnap.data().routines)) {
+          setRoutines(userDocSnap.data().routines as Routine[]);
+        } else {
+          setRoutines([]);
+        }
+      } catch (error: any) {
+        console.warn('Failed to load routines:', error.message);
+      } finally {
+        setRoutinesLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // ── Persist a routines array to Firestore for the current user ──
+  const persistRoutines = useCallback(async (updatedRoutines: Routine[]) => {
+    const user = auth.currentUser;
+    if (!user) return;
+    try {
+      await setDoc(
+        doc(db, 'users', user.uid),
+        { routines: updatedRoutines, updatedAt: serverTimestamp() },
+        { merge: true }
+      );
+    } catch (error: any) {
+      Alert.alert('Sync error', `Routines saved locally but failed to sync: ${error.message}`);
+    }
+  }, []);
 
   // ── Workout timer ──
   useEffect(() => {
@@ -1297,9 +1352,13 @@ export default function WorkoutScreen() {
 
   // ── Routine actions ──
   const handleSaveRoutine = useCallback((routine: Routine) => {
-    setRoutines(prev => [...prev, routine]);
+    setRoutines(prev => {
+      const updated = [...prev, routine];
+      persistRoutines(updated);
+      return updated;
+    });
     setCreateRoutineVisible(false);
-  }, []);
+  }, [persistRoutines]);
 
   const handleStartRoutine = useCallback((routine: Routine) => {
     if (exercises.length > 0) {
@@ -1328,10 +1387,16 @@ export default function WorkoutScreen() {
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => setRoutines(prev => prev.filter(r => r.id !== routine.id)),
+        onPress: () => {
+          setRoutines(prev => {
+            const updated = prev.filter(r => r.id !== routine.id);
+            persistRoutines(updated);
+            return updated;
+          });
+        },
       },
     ]);
-  }, []);
+  }, [persistRoutines]);
 
   // ── Filtered library ──
   const filteredLibrary = EXERCISE_LIBRARY.filter(e => {
@@ -1676,12 +1741,18 @@ export default function WorkoutScreen() {
             </View>
 
             {/* My Routines collapsible */}
-            <RoutineList
-              routines={routines}
-              onStart={handleStartRoutine}
-              onMenu={handleRoutineMenu}
-              r={r}
-            />
+            {routinesLoading ? (
+              <View style={{ paddingVertical: r.spacing.xl, alignItems: 'center' }}>
+                <ActivityIndicator size="small" color="#000" />
+              </View>
+            ) : (
+              <RoutineList
+                routines={routines}
+                onStart={handleStartRoutine}
+                onMenu={handleRoutineMenu}
+                r={r}
+              />
+            )}
           </View>
         )}
       </ScrollView>
