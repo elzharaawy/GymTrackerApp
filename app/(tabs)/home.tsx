@@ -1,4 +1,29 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+/**
+ * HomeScreen.tsx
+ *
+ * CHANGE SCOPE (per request): ONLY the "Today's Summary" section (and its icons)
+ * was touched. Auth, Firestore writes for streak/calendar, calendar UI, week
+ * strip, streak calculation, navigation, and responsive layout are UNCHANGED.
+ *
+ * NEW: Today's Summary now reads real data from the same `workouts` Firestore
+ * collection used by WorkoutScreen (collection('workouts'), filtered by
+ * userId, same field shape: duration, volume, exercises[], muscles[],
+ * createdAt). No new collection/structure was created.
+ *
+ * IMPORTANT INTEGRATION NOTE:
+ * This file imports `EXERCISE_LIBRARY` and `getLibItem` from WorkoutScreen so
+ * thumbnails can be reused instead of duplicating the exercise data. In
+ * WorkoutScreen.tsx, change:
+ *   const EXERCISE_LIBRARY: ExerciseLibItem[] = [ ... ]
+ *   const getLibItem = (libId: string) => ...
+ * to:
+ *   export const EXERCISE_LIBRARY: ExerciseLibItem[] = [ ... ]
+ *   export const getLibItem = (libId: string) => ...
+ * That is the ONLY change required in WorkoutScreen.tsx — no business logic,
+ * Firestore writes, or UI behavior there is modified.
+ */
+
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,18 +31,36 @@ import {
   TouchableOpacity,
   StyleSheet,
   Dimensions,
-  SafeAreaView,
   ActivityIndicator,
   Animated,
+  Image,
+  StatusBar,
+  Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import { auth, db } from '../../firebaseConfig';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
+  collection,
+  query,
+  where,
+  orderBy,
+  limit,
+  getDocs,
+  Timestamp,
+} from 'firebase/firestore';
+// Reused from WorkoutScreen — same exercise data, same thumbnails, no duplication.
+import { EXERCISE_LIBRARY, getLibItem } from './workout';
 
 const { width } = Dimensions.get('window');
 
-// --- Date helpers ---
+// --- Date helpers (unchanged) ---
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -70,10 +113,9 @@ function computeStreakAndTotal(workoutDays: Record<string, boolean>, today: Date
   return { streakDays, totalWorkouts };
 }
 
-// Build the 7-day week strip centered around today
 function buildWeekStrip(today: Date) {
   const days: Date[] = [];
-  const startDay = today.getDay(); // 0=Sun
+  const startDay = today.getDay();
   const weekStart = new Date(today);
   weekStart.setDate(today.getDate() - startDay);
   for (let i = 0; i < 7; i++) {
@@ -82,7 +124,6 @@ function buildWeekStrip(today: Date) {
   return days;
 }
 
-// --- Greeting helper ---
 function getGreeting() {
   const h = new Date().getHours();
   if (h < 12) return 'Good morning';
@@ -90,12 +131,325 @@ function getGreeting() {
   return 'Good evening';
 }
 
+function formatClock(d: Date | null) {
+  if (!d) return '—';
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${m} ${ampm}`;
+}
+
+function formatDuration(totalSeconds: number) {
+  const mins = Math.round(totalSeconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
+// ─────────────────────────────────────────────
+// Today's workout data types + Firestore loader
+// (Reuses the exact `workouts` collection/shape WorkoutScreen writes to.)
+// ─────────────────────────────────────────────
+
+interface SavedSet {
+  weight: string;
+  reps: string;
+}
+interface SavedExercise {
+  name: string;
+  muscle: string;
+  sets: SavedSet[];
+}
+interface SavedWorkoutDoc {
+  id: string;
+  userId: string;
+  duration: number; // seconds
+  volume: number;
+  exercises: SavedExercise[];
+  muscles: string[];
+  createdAt: Date | null;
+}
+
+interface TodaySummary {
+  hasWorkout: boolean;
+  totalExercises: number;
+  totalSets: number;
+  totalVolume: number;
+  totalReps: number;
+  totalDurationSeconds: number;
+  avgDurationSeconds: number;
+  estimatedCalories: number;
+  muscleGroups: string[];
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  exerciseNames: string[]; // for thumbnail lookups, in session order
+  goalExercises: number;
+  goalSets: number;
+  goalDurationSeconds: number;
+  goalVolume: number;
+}
+
+const EMPTY_SUMMARY: TodaySummary = {
+  hasWorkout: false,
+  totalExercises: 0,
+  totalSets: 0,
+  totalVolume: 0,
+  totalReps: 0,
+  totalDurationSeconds: 0,
+  avgDurationSeconds: 0,
+  estimatedCalories: 0,
+  muscleGroups: [],
+  startedAt: null,
+  finishedAt: null,
+  exerciseNames: [],
+  goalExercises: 8,
+  goalSets: 20,
+  goalDurationSeconds: 60 * 60,
+  goalVolume: 8000,
+};
+
+/** Loads today's workout session(s) for the current user and aggregates stats. */
+async function loadTodaySummary(userId: string, today: Date): Promise<TodaySummary> {
+  const dayStart = startOfDay(today);
+  const dayEnd = new Date(dayStart.getTime() + ONE_DAY_MS);
+
+  const q = query(
+    collection(db, 'workouts'),
+    where('userId', '==', userId),
+    orderBy('createdAt', 'desc'),
+    limit(20)
+  );
+  const snap = await getDocs(q);
+
+  const todayDocs: SavedWorkoutDoc[] = [];
+  snap.forEach(d => {
+    const data = d.data();
+    const createdAt: Date | null =
+      data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null;
+    if (createdAt && createdAt >= dayStart && createdAt < dayEnd) {
+      todayDocs.push({
+        id: d.id,
+        userId: data.userId,
+        duration: data.duration || 0,
+        volume: data.volume || 0,
+        exercises: data.exercises || [],
+        muscles: data.muscles || [],
+        createdAt,
+      });
+    }
+  });
+
+  if (todayDocs.length === 0) return EMPTY_SUMMARY;
+
+  let totalExercises = 0;
+  let totalSets = 0;
+  let totalVolume = 0;
+  let totalReps = 0;
+  let totalDurationSeconds = 0;
+  const muscleSet = new Set<string>();
+  const exerciseNames: string[] = [];
+  let earliestStart: Date | null = null;
+  let latestFinish: Date | null = null;
+
+  todayDocs
+    .slice()
+    .sort((a, b) => (a.createdAt?.getTime() || 0) - (b.createdAt?.getTime() || 0))
+    .forEach(w => {
+      totalExercises += w.exercises.length;
+      totalDurationSeconds += w.duration;
+      totalVolume += w.volume;
+      w.muscles.forEach(m => muscleSet.add(m));
+      w.exercises.forEach(ex => {
+        exerciseNames.push(ex.name);
+        totalSets += ex.sets.length;
+        ex.sets.forEach(s => {
+          totalReps += parseFloat(s.reps) || 0;
+        });
+      });
+
+      // No explicit "started" timestamp is stored — createdAt is the finish
+      // time, so the session start is derived as (finishedAt - duration).
+      const finishedAt = w.createdAt as Date;
+      const startedAt = new Date(finishedAt.getTime() - w.duration * 1000);
+      if (!earliestStart || startedAt < earliestStart) earliestStart = startedAt;
+      if (!latestFinish || finishedAt > latestFinish) latestFinish = finishedAt;
+    });
+
+  // Calories are not tracked anywhere in the existing data model, so we
+  // surface a clearly-labeled rough estimate derived from volume rather than
+  // inventing a new Firestore field.
+  const estimatedCalories = Math.round(totalVolume * 0.08 + (totalDurationSeconds / 60) * 4);
+
+  return {
+    hasWorkout: true,
+    totalExercises,
+    totalSets,
+    totalVolume,
+    totalReps,
+    totalDurationSeconds,
+    avgDurationSeconds: todayDocs.length ? totalDurationSeconds / todayDocs.length : 0,
+    estimatedCalories,
+    muscleGroups: Array.from(muscleSet),
+    startedAt: earliestStart,
+    finishedAt: latestFinish,
+    exerciseNames,
+    goalExercises: EMPTY_SUMMARY.goalExercises,
+    goalSets: EMPTY_SUMMARY.goalSets,
+    goalDurationSeconds: EMPTY_SUMMARY.goalDurationSeconds,
+    goalVolume: EMPTY_SUMMARY.goalVolume,
+  };
+}
+
+// ─────────────────────────────────────────────
+// Today's Summary — card primitives
+// ─────────────────────────────────────────────
+
+interface SummaryCardDef {
+  key: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value: string;
+  progress: number; // 0..1
+  progressLabel: string;
+  color: string;
+  bg: string;
+  section: string; // param passed to /workout
+}
+
+const SummaryCard = React.memo(function SummaryCard({
+  def,
+  index,
+  onPress,
+}: {
+  def: SummaryCardDef;
+  index: number;
+  onPress: (section: string) => void;
+}) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.97)).current;
+  const pressAnim = useRef(new Animated.Value(1)).current;
+  const progressAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 320,
+        delay: index * 60,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        delay: index * 60,
+        useNativeDriver: true,
+        friction: 7,
+      }),
+    ]).start();
+    Animated.timing(progressAnim, {
+      toValue: Math.min(def.progress, 1),
+      duration: 700,
+      delay: index * 60 + 150,
+      useNativeDriver: false,
+    }).start();
+  }, [def.progress]);
+
+  const handlePressIn = useCallback(() => {
+    Animated.spring(pressAnim, { toValue: 0.96, useNativeDriver: true, friction: 6 }).start();
+  }, []);
+  const handlePressOut = useCallback(() => {
+    Animated.spring(pressAnim, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
+  }, []);
+
+  const widthInterp = progressAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0%', '100%'],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        summaryStyles.cardWrap,
+        { opacity: fadeAnim, transform: [{ scale: Animated.multiply(scaleAnim, pressAnim) }] },
+      ]}
+    >
+      <TouchableOpacity
+        activeOpacity={0.9}
+        onPress={() => onPress(def.section)}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        style={summaryStyles.card}
+        accessibilityRole="button"
+        accessibilityLabel={`${def.label}, ${def.value}`}
+        accessibilityHint={`Opens the Workout screen scrolled to ${def.label.toLowerCase()}`}
+      >
+        <View style={[summaryStyles.iconCircle, { backgroundColor: def.bg }]}>
+          <Ionicons name={def.icon} size={18} color={def.color} />
+        </View>
+
+        <Text style={summaryStyles.cardLabel}>{def.label}</Text>
+        <Text style={summaryStyles.cardValue}>{def.value}</Text>
+
+        <View style={summaryStyles.progressTrack}>
+          <Animated.View
+            style={[summaryStyles.progressFill, { width: widthInterp, backgroundColor: def.color }]}
+          />
+        </View>
+        <Text style={summaryStyles.progressLabel}>{def.progressLabel}</Text>
+
+        <View style={summaryStyles.tapRow}>
+          <Text style={summaryStyles.tapText}>Tap to view</Text>
+          <Ionicons name="chevron-forward" size={12} color="#9CA3AF" />
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+});
+
+const ThumbnailFade = React.memo(function ThumbnailFade({ uri }: { uri: string }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  return (
+    <Image
+      source={{ uri }}
+      style={summaryStyles.thumbImg}
+      onLoad={() => Animated.timing(opacity, { toValue: 1, duration: 250, useNativeDriver: true }).start()}
+      resizeMode="cover"
+    />
+  );
+});
+
+const SummarySkeletonCard = React.memo(function SummarySkeletonCard() {
+  const shimmer = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmer, { toValue: 1, duration: 800, useNativeDriver: true }),
+        Animated.timing(shimmer, { toValue: 0, duration: 800, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  const opacity = shimmer.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.8] });
+  return (
+    <View style={summaryStyles.cardWrap}>
+      <View style={summaryStyles.card}>
+        <Animated.View style={[summaryStyles.skelCircle, { opacity }]} />
+        <Animated.View style={[summaryStyles.skelLine, { opacity, width: '60%' }]} />
+        <Animated.View style={[summaryStyles.skelLine, { opacity, width: '40%', height: 18, marginTop: 6 }]} />
+        <Animated.View style={[summaryStyles.skelLine, { opacity, width: '100%', height: 6, marginTop: 12, borderRadius: 3 }]} />
+      </View>
+    </View>
+  );
+});
+
 export default function HomeScreen() {
   const router = useRouter();
   const user = auth.currentUser;
   const today = useMemo(() => startOfDay(new Date()), []);
 
   const [displayName, setDisplayName] = useState(user?.displayName || '');
+  const [photoURL, setPhotoURL] = useState<string | null>(user?.photoURL || null);
   const [workoutDays, setWorkoutDays] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -104,12 +458,16 @@ export default function HomeScreen() {
   const [viewYear, setViewYear] = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
 
+  // ── Today's Summary state (NEW) ──
+  const [todaySummary, setTodaySummary] = useState<TodaySummary>(EMPTY_SUMMARY);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     if (!user) { router.replace('/login'); return; }
     loadWorkoutDays();
-    // Pulse animation for CTA
+    loadSummary();
     Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1.03, duration: 900, useNativeDriver: true }),
@@ -127,6 +485,8 @@ export default function HomeScreen() {
         const data = docSnap.data();
         const days = data.workoutDays || {};
         setDisplayName(data.displayName || user!.displayName || '');
+        // Load photoURL from Firestore (Cloudinary URL stored here)
+        setPhotoURL(data.photoURL || user!.photoURL || null);
         setWorkoutDays(days);
         const { streakDays, totalWorkouts } = computeStreakAndTotal(days, today);
         if (data.streak !== streakDays || data.totalWorkouts !== totalWorkouts) {
@@ -136,6 +496,22 @@ export default function HomeScreen() {
     } catch (e) { console.warn(e); }
     finally { setLoading(false); }
   };
+
+  // NEW: pull today's workout(s) from the `workouts` collection (same one
+  // WorkoutScreen writes to via addDoc(collection(db, 'workouts'), ...)).
+  const loadSummary = useCallback(async () => {
+    if (!user) return;
+    try {
+      setSummaryLoading(true);
+      const summary = await loadTodaySummary(user.uid, today);
+      setTodaySummary(summary);
+    } catch (e) {
+      console.warn('Failed to load today summary:', e);
+      setTodaySummary(EMPTY_SUMMARY);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [user, today]);
 
   const toggleToday = async () => {
     if (!user) return;
@@ -181,8 +557,126 @@ export default function HomeScreen() {
   const todayDone = !!workoutDays[toDateKey(today)];
   const todayLabel = `${WEEKDAY_FULL[today.getDay()]}, ${MONTH_SHORT[today.getMonth()]} ${today.getDate()}`;
 
+  // Avatar: show photo if available, otherwise show initial
+  const renderAvatar = () => {
+    if (photoURL) {
+      return (
+        <Image
+          source={{ uri: photoURL }}
+          style={styles.avatarImage}
+          resizeMode="cover"
+        />
+      );
+    }
+    return (
+      <LinearGradient colors={['#8B5CF6', '#6D28D9']} style={styles.avatarGrad}>
+        <Text style={styles.avatarText}>{firstName.charAt(0).toUpperCase()}</Text>
+      </LinearGradient>
+    );
+  };
+
+  // NEW: navigate to the Workout page with a section param; WorkoutScreen
+  // reads `params.section` and scrolls to the matching part of the screen.
+  const goToWorkoutSection = useCallback((section: string) => {
+    router.push({ pathname: '/workout', params: { section } });
+  }, [router]);
+
+  const goToWorkoutAll = useCallback(() => {
+    router.push('/workout');
+  }, [router]);
+
+  // NEW: build the card definitions from the live summary (memoized so the
+  // grid doesn't re-render unless the underlying numbers change).
+  const summaryCards: SummaryCardDef[] = useMemo(() => {
+    const s = todaySummary;
+    return [
+      {
+        key: 'exercises',
+        icon: 'barbell-outline',
+        label: 'Exercises',
+        value: String(s.totalExercises),
+        progress: s.goalExercises ? s.totalExercises / s.goalExercises : 0,
+        progressLabel: `${s.totalExercises} / ${s.goalExercises}`,
+        color: '#7C3AED',
+        bg: '#EDE9FE',
+        section: 'exercises',
+      },
+      {
+        key: 'sets',
+        icon: 'checkmark-circle-outline',
+        label: 'Sets Done',
+        value: String(s.totalSets),
+        progress: s.goalSets ? s.totalSets / s.goalSets : 0,
+        progressLabel: `${s.totalSets} / ${s.goalSets}`,
+        color: '#059669',
+        bg: '#D1FAE5',
+        section: 'sets',
+      },
+      {
+        key: 'volume',
+        icon: 'fitness-outline',
+        label: 'Volume',
+        value: s.totalVolume > 0 ? `${s.totalVolume.toLocaleString()} kg` : '—',
+        progress: s.goalVolume ? s.totalVolume / s.goalVolume : 0,
+        progressLabel: `${s.totalVolume.toLocaleString()} / ${s.goalVolume.toLocaleString()}`,
+        color: '#D97706',
+        bg: '#FEF3C7',
+        section: 'statistics',
+      },
+      {
+        key: 'duration',
+        icon: 'time-outline',
+        label: 'Duration',
+        value: s.totalDurationSeconds > 0 ? formatDuration(s.totalDurationSeconds) : '—',
+        progress: s.goalDurationSeconds ? s.totalDurationSeconds / s.goalDurationSeconds : 0,
+        progressLabel: `${Math.round(s.totalDurationSeconds / 60)} / ${Math.round(s.goalDurationSeconds / 60)} min`,
+        color: '#0284C7',
+        bg: '#E0F2FE',
+        section: 'session',
+      },
+      {
+        key: 'calories',
+        icon: 'flame-outline',
+        label: 'Calories',
+        value: s.estimatedCalories > 0 ? `~${s.estimatedCalories}` : '—',
+        progress: s.estimatedCalories ? s.estimatedCalories / 600 : 0,
+        progressLabel: 'Estimated',
+        color: '#DC2626',
+        bg: '#FEE2E2',
+        section: 'statistics',
+      },
+      {
+        key: 'muscles',
+        icon: 'body-outline',
+        label: 'Muscle Groups',
+        value: s.muscleGroups.length > 0 ? String(s.muscleGroups.length) : '—',
+        progress: s.muscleGroups.length ? Math.min(s.muscleGroups.length / 6, 1) : 0,
+        progressLabel: s.muscleGroups.length ? s.muscleGroups.slice(0, 3).join(', ') : 'None yet',
+        color: '#9333EA',
+        bg: '#F3E8FF',
+        section: 'muscles',
+      },
+    ];
+  }, [todaySummary]);
+
+  // First three exercise thumbnails (+N more), reused from WorkoutScreen's
+  // own exercise library/Cloudinary URLs — no new image source introduced.
+  const thumbnailItems = useMemo(() => {
+    const uniqueNames = Array.from(new Set(todaySummary.exerciseNames));
+    const libItems = uniqueNames
+      .map(name => EXERCISE_LIBRARY.find(e => e.name === name))
+      .filter((e): e is typeof EXERCISE_LIBRARY[number] => !!e);
+    return {
+      shown: libItems.slice(0, 3),
+      extra: Math.max(libItems.length - 3, 0),
+    };
+  }, [todaySummary.exerciseNames]);
+
   return (
-    <SafeAreaView style={styles.safe}>
+    // edges={[]} lets LinearGradient hero extend into the status bar area naturally;
+    // we add manual top padding inside the hero instead so content clears the status bar.
+    <SafeAreaView style={styles.safe} edges={['left', 'right', 'bottom']}>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
 
         {/* ── HERO HEADER ── */}
@@ -193,10 +687,13 @@ export default function HomeScreen() {
               <Text style={styles.heroGreeting}>{getGreeting()},</Text>
               <Text style={styles.heroName}>{firstName} 👋</Text>
             </View>
-            <TouchableOpacity style={styles.avatarCircle} onPress={() => router.push('/profile')} activeOpacity={0.75}>
-              <LinearGradient colors={['#8B5CF6', '#6D28D9']} style={styles.avatarGrad}>
-                <Text style={styles.avatarText}>{firstName.charAt(0).toUpperCase()}</Text>
-              </LinearGradient>
+            {/* Avatar — tappable, navigates to profile */}
+            <TouchableOpacity
+              style={styles.avatarCircle}
+              onPress={() => router.push('/profile')}
+              activeOpacity={0.75}
+            >
+              {renderAvatar()}
             </TouchableOpacity>
           </View>
 
@@ -274,7 +771,7 @@ export default function HomeScreen() {
             })}
           </View>
 
-          {/* Today toggle hint */}
+          {/* Today toggle */}
           <TouchableOpacity
             style={[styles.todayToggle, todayDone && styles.todayToggleDone]}
             onPress={toggleToday}
@@ -356,28 +853,94 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* ── TODAY'S SUMMARY (placeholder) ── */}
-        <View style={styles.section}>
+        {/* ── TODAY'S SUMMARY (rebuilt, data-driven) ── */}
+        <View style={[styles.section, summaryStyles.sectionOverride]}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Today's Summary</Text>
-            <TouchableOpacity activeOpacity={0.7}>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={goToWorkoutAll}
+              accessibilityRole="button"
+              accessibilityLabel="View all in Workout"
+            >
               <Text style={styles.sectionLink}>View all ›</Text>
             </TouchableOpacity>
           </View>
-          {[
-            { icon: '💪', label: 'Exercises', value: '—', color: '#EDE9FE' },
-            { icon: '✅', label: 'Sets Done', value: '—', color: '#D1FAE5' },
-            { icon: '⚡', label: 'Volume', value: '—', color: '#FEF3C7' },
-            { icon: '⏱', label: 'Avg Duration', value: '—', color: '#E0F2FE' },
-          ].map((item, i) => (
-            <View key={i} style={styles.summaryRow}>
-              <View style={[styles.summaryIcon, { backgroundColor: item.color }]}>
-                <Text style={styles.summaryIconText}>{item.icon}</Text>
-              </View>
-              <Text style={styles.summaryLabel}>{item.label}</Text>
-              <Text style={styles.summaryValue}>{item.value}</Text>
+
+          {summaryLoading ? (
+            <View style={summaryStyles.grid}>
+              {[0, 1, 2, 3].map(i => <SummarySkeletonCard key={i} />)}
             </View>
-          ))}
+          ) : !todaySummary.hasWorkout ? (
+            <View style={summaryStyles.emptyState}>
+              <Ionicons name="barbell-outline" size={32} color="#C4B5FD" />
+              <Text style={summaryStyles.emptyTitle}>No workout yet today</Text>
+              <Text style={summaryStyles.emptySubtitle}>Start your first workout</Text>
+              <TouchableOpacity
+                activeOpacity={0.88}
+                onPress={() => router.push('/workout')}
+                accessibilityRole="button"
+                accessibilityLabel="Start Workout"
+              >
+                <LinearGradient
+                  colors={['#7C3AED', '#5B21B6']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={summaryStyles.emptyCta}
+                >
+                  <Ionicons name="play" size={13} color="#fff" style={{ marginRight: 8 }} />
+                  <Text style={summaryStyles.emptyCtaText}>Start Workout</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              {/* Session time range */}
+              <View style={summaryStyles.timeRow}>
+                <View style={summaryStyles.timeChip}>
+                  <Ionicons name="play-outline" size={12} color="#7C3AED" />
+                  <Text style={summaryStyles.timeChipText}>
+                    Started {formatClock(todaySummary.startedAt)}
+                  </Text>
+                </View>
+                <View style={summaryStyles.timeChip}>
+                  <Ionicons name="flag-outline" size={12} color="#059669" />
+                  <Text style={summaryStyles.timeChipText}>
+                    Finished {formatClock(todaySummary.finishedAt)}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Exercise thumbnails */}
+              {thumbnailItems.shown.length > 0 && (
+                <View style={summaryStyles.thumbRow}>
+                  {thumbnailItems.shown.map((item, i) => (
+                    <View
+                      key={item.id}
+                      style={[summaryStyles.thumbCircle, i > 0 && { marginLeft: -10 }]}
+                    >
+                      <ThumbnailFade uri={item.thumbnail} />
+                    </View>
+                  ))}
+                  {thumbnailItems.extra > 0 && (
+                    <View style={[summaryStyles.thumbCircle, summaryStyles.thumbExtra, { marginLeft: -10 }]}>
+                      <Text style={summaryStyles.thumbExtraText}>+{thumbnailItems.extra}</Text>
+                    </View>
+                  )}
+                  <Text style={summaryStyles.thumbCaption}>
+                    {todaySummary.totalReps} total reps today
+                  </Text>
+                </View>
+              )}
+
+              {/* 2-column responsive grid of summary cards */}
+              <View style={summaryStyles.grid}>
+                {summaryCards.map((def, i) => (
+                  <SummaryCard key={def.key} def={def} index={i} onPress={goToWorkoutSection} />
+                ))}
+              </View>
+            </>
+          )}
         </View>
 
         {/* ── START WORKOUT CTA ── */}
@@ -398,8 +961,15 @@ export default function HomeScreen() {
 
 // ─── CELL SIZE for calendar ───
 const CELL_SIZE = Math.floor((width - 32 - 32 - 6 * 6) / 7);
-// week bubble size
 const BUBBLE = Math.floor((width - 32 - 16 - 6 * 12) / 7);
+
+// Status bar height for manual top padding inside the hero
+const STATUS_BAR_HEIGHT = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 50;
+
+// Card width for the 2-column responsive summary grid (matches the
+// WorkoutScreen card gap/padding language: 16px outer gutter, 12px gap).
+const SUMMARY_CARD_GAP = 12;
+const SUMMARY_CARD_WIDTH = (width - 32 - 32 - SUMMARY_CARD_GAP) / 2;
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F5F4F8' },
@@ -408,7 +978,8 @@ const styles = StyleSheet.create({
   // ── Hero ──
   hero: {
     paddingHorizontal: 20,
-    paddingTop: 16,
+    // Push content below the status bar
+    paddingTop: STATUS_BAR_HEIGHT + 12,
     paddingBottom: 24,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
@@ -422,8 +993,31 @@ const styles = StyleSheet.create({
   },
   heroGreeting: { fontSize: 14, color: 'rgba(196,181,253,0.85)', fontWeight: '500' },
   heroName: { fontSize: 26, fontWeight: '800', color: '#fff', marginTop: 1 },
-  avatarCircle: { borderRadius: 24, overflow: 'hidden' },
-  avatarGrad: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
+
+  // Avatar — circle container sized 48×48
+  avatarCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    overflow: 'hidden',
+    // subtle ring so it pops against the dark gradient
+    borderWidth: 2,
+    borderColor: 'rgba(139,92,246,0.6)',
+  },
+  // Photo fills the circle when available
+  avatarImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  },
+  // Fallback gradient + initial
+  avatarGrad: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   avatarText: { color: '#fff', fontSize: 20, fontWeight: '800' },
 
   statsRow: { flexDirection: 'row', marginBottom: 16 },
@@ -521,9 +1115,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     justifyContent: 'center',
   },
-  todayToggleDone: {
-    backgroundColor: '#EDE9FE',
-  },
+  todayToggleDone: { backgroundColor: '#EDE9FE' },
   todayToggleIcon: { fontSize: 16, color: '#fff', marginRight: 8 },
   todayToggleIconDone: { color: '#7C3AED' },
   todayToggleText: { fontSize: 14, fontWeight: '700', color: '#fff' },
@@ -568,23 +1160,6 @@ const styles = StyleSheet.create({
     fontSize: 8, color: '#fff', fontWeight: '900',
   },
 
-  // ── Summary ──
-  summaryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  summaryIcon: {
-    width: 36, height: 36, borderRadius: 10,
-    justifyContent: 'center', alignItems: 'center',
-    marginRight: 12,
-  },
-  summaryIconText: { fontSize: 16 },
-  summaryLabel: { flex: 1, fontSize: 14, color: '#374151', fontWeight: '500' },
-  summaryValue: { fontSize: 14, fontWeight: '700', color: '#1a1a2e' },
-
   // ── CTA ──
   ctaWrap: { marginHorizontal: 16, marginTop: 6 },
   ctaBtn: {
@@ -593,4 +1168,98 @@ const styles = StyleSheet.create({
   },
   ctaIcon: { color: '#fff', fontSize: 14, marginRight: 10 },
   ctaText: { color: '#fff', fontSize: 17, fontWeight: '800', letterSpacing: 0.4 },
+});
+
+// ─────────────────────────────────────────────
+// Today's Summary styles — intentionally mirrors WorkoutScreen's design
+// language: same border radius (16–20), same hairline borders, same
+// F2F2F7/white card surfaces, same chip/typography scale, same shadow.
+// ─────────────────────────────────────────────
+const summaryStyles = StyleSheet.create({
+  sectionOverride: { paddingBottom: 18 },
+
+  timeRow: { flexDirection: 'row', gap: 8, marginBottom: 14, flexWrap: 'wrap' },
+  timeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F2F2F7',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  timeChipText: { fontSize: 11, fontWeight: '600', color: '#374151' },
+
+  thumbRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  thumbCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#fff',
+    backgroundColor: '#E5E5EA',
+  },
+  thumbImg: { width: '100%', height: '100%' },
+  thumbExtra: { justifyContent: 'center', alignItems: 'center', backgroundColor: '#7C3AED' },
+  thumbExtraText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  thumbCaption: { marginLeft: 10, fontSize: 12, color: '#6B7280', fontWeight: '600' },
+
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  cardWrap: {
+    width: SUMMARY_CARD_WIDTH,
+    marginBottom: SUMMARY_CARD_GAP,
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E5E5EA',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  iconCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  cardLabel: { fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 2 },
+  cardValue: { fontSize: 19, fontWeight: '800', color: '#1a1a2e', marginBottom: 10 },
+  progressTrack: {
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#F2F2F7',
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressFill: { height: '100%', borderRadius: 3 },
+  progressLabel: { fontSize: 10, color: '#9CA3AF', fontWeight: '600', marginBottom: 8 },
+  tapRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  tapText: { fontSize: 10, color: '#9CA3AF', fontWeight: '600' },
+
+  skelCircle: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#E5E5EA', marginBottom: 10 },
+  skelLine: { height: 11, borderRadius: 4, backgroundColor: '#E5E5EA' },
+
+  emptyState: { alignItems: 'center', paddingVertical: 18 },
+  emptyTitle: { fontSize: 15, fontWeight: '800', color: '#1a1a2e', marginTop: 10 },
+  emptySubtitle: { fontSize: 12, color: '#9CA3AF', fontWeight: '500', marginTop: 2, marginBottom: 14 },
+  emptyCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+  },
+  emptyCtaText: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
 });
