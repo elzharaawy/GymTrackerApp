@@ -12,9 +12,8 @@ import {
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { auth, db, storage } from '../../firebaseConfig';
+import { auth, db } from '../../firebaseConfig';
 import {
   updateProfile,
   updateEmail,
@@ -31,12 +30,8 @@ import {
   updateDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import {
-  ref as storageRef,
-  uploadBytes,
-  getDownloadURL,
-  deleteObject,
-} from 'firebase/storage';
+import { uploadImage } from '../../services/cloudinary';
+import { chooseImage } from '../../utils/imagePicker';
 
 // --- Types ---
 interface UserProfile {
@@ -149,55 +144,23 @@ export default function ProfileScreen() {
     }
   };
 
-  // --- Pick + upload profile photo ---
+  // --- Pick photo via chooseImage util (gallery + camera) ---
   const handlePickPhoto = async () => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert(
-        'Permission needed',
-        'Please allow access to your photo library to set a profile picture.'
-      );
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'], // ✅ Fixed: replaces deprecated MediaTypeOptions.Images
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.7,
-    });
-
-    if (result.canceled || !result.assets?.length) return;
-
-    await uploadPhoto(result.assets[0].uri);
+    const uri = await chooseImage();
+    if (!uri) return;
+    await uploadPhoto(uri);
   };
 
-  // ✅ Fixed: use XMLHttpRequest instead of fetch() for reliable local file URI → blob conversion
-  const uriToBlob = (uri: string): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.onload = () => resolve(xhr.response);
-      xhr.onerror = () => reject(new Error('Failed to convert URI to blob'));
-      xhr.responseType = 'blob';
-      xhr.open('GET', uri, true);
-      xhr.send(null);
-    });
-  };
-
+  // --- Upload to Cloudinary, then persist URL to Firebase Auth + Firestore ---
   const uploadPhoto = async (uri: string) => {
     if (!user) return;
     try {
       setUploadingPhoto(true);
 
-      // ✅ Fixed: XMLHttpRequest handles file:// URIs correctly on both iOS & Android
-      const blob = await uriToBlob(uri);
+      // Upload to Cloudinary scoped per user
+      const downloadURL = await uploadImage(uri, `gymtracker/profile/${user.uid}`);
 
-      // Upload to Firebase Storage at a per-user path
-      const fileRef = storageRef(storage, `profile-photos/${user.uid}.jpg`);
-      await uploadBytes(fileRef, blob);
-      const downloadURL = await getDownloadURL(fileRef);
-
-      // Update Firebase Auth + Firestore with the new URL
+      // Update Firebase Auth display photo + Firestore record
       await updateProfile(user, { photoURL: downloadURL });
       await updateDoc(doc(db, 'users', user.uid), {
         photoURL: downloadURL,
@@ -212,6 +175,7 @@ export default function ProfileScreen() {
     }
   };
 
+  // --- Remove photo reference (Cloudinary deletion requires a signed server-side call) ---
   const handleRemovePhoto = () => {
     Alert.alert('Remove Photo', 'Remove your profile picture?', [
       { text: 'Cancel', style: 'cancel' },
@@ -222,10 +186,6 @@ export default function ProfileScreen() {
           try {
             setUploadingPhoto(true);
             if (user) {
-              // Best-effort delete from Storage; ignore if it doesn't exist
-              try {
-                await deleteObject(storageRef(storage, `profile-photos/${user.uid}.jpg`));
-              } catch {}
               await updateProfile(user, { photoURL: null });
               await updateDoc(doc(db, 'users', user.uid), {
                 photoURL: null,
@@ -355,10 +315,8 @@ export default function ProfileScreen() {
             try {
               const docRef = doc(db, 'users', user!.uid);
               await updateDoc(docRef, { deleted: true, deletedAt: serverTimestamp() });
-              // Best-effort cleanup of stored photo
-              try {
-                await deleteObject(storageRef(storage, `profile-photos/${user!.uid}.jpg`));
-              } catch {}
+              // Note: Cloudinary asset cleanup requires a signed server-side API call.
+              // The photo URL reference is removed via Firestore above.
               await deleteUser(user!);
               router.replace('/');
             } catch (error: any) {

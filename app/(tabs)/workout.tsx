@@ -8,6 +8,11 @@
  * ✓ Performance: FlatList, memo, useCallback maintained
  * ✓ NEW: Routines are now persisted to Firestore (per-user) so they survive
  *        login/logout and reload automatically when the user signs back in.
+ *
+ * ONLY CHANGE in this version: `EXERCISE_LIBRARY` and `getLibItem` are now
+ * exported so HomeScreen.tsx can reuse the same exercise data/thumbnails
+ * instead of duplicating them. No other logic, Firestore behavior, or UI
+ * was modified.
  */
 
 import React, {
@@ -171,7 +176,7 @@ const vid = (path: string) => `${CDN_VIDEO}/q_auto/${path}`;
 // ─────────────────────────────────────────────
 // Exercise Library
 // ─────────────────────────────────────────────
-const EXERCISE_LIBRARY: ExerciseLibItem[] = [
+export const EXERCISE_LIBRARY: ExerciseLibItem[] = [
   {
     id: 'bench_press_barbell',
     name: 'Bench Press (Barbell)',
@@ -464,7 +469,7 @@ const difficultyColors: Record<string, { bg: string; text: string }> = {
 // Helpers
 // ─────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2, 10);
-const getLibItem = (libId: string): ExerciseLibItem | undefined =>
+export const getLibItem = (libId: string): ExerciseLibItem | undefined =>
   EXERCISE_LIBRARY.find(e => e.id === libId);
 
 // ─────────────────────────────────────────────

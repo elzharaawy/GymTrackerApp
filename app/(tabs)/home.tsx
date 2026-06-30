@@ -50,7 +50,6 @@ import {
   collection,
   query,
   where,
-  orderBy,
   limit,
   getDocs,
   Timestamp,
@@ -216,11 +215,15 @@ async function loadTodaySummary(userId: string, today: Date): Promise<TodaySumma
   const dayStart = startOfDay(today);
   const dayEnd = new Date(dayStart.getTime() + ONE_DAY_MS);
 
+  // NOTE: intentionally no orderBy() here — combining where('userId', ...)
+  // with orderBy('createdAt', ...) requires a Firestore composite index.
+  // Without that index the query throws, gets swallowed by the catch in
+  // loadSummary(), and silently renders the empty state. Sorting is done
+  // client-side below instead, since we only need ~today's docs anyway.
   const q = query(
     collection(db, 'workouts'),
     where('userId', '==', userId),
-    orderBy('createdAt', 'desc'),
-    limit(20)
+    limit(50)
   );
   const snap = await getDocs(q);
 
